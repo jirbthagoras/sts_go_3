@@ -27,6 +27,39 @@
             overflow: hidden;
         }
         
+        .login-container {
+            max-width: 400px;
+            margin: 50px auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .hidden {
+            display: none !important;
+        }
+        
+        .auth-info {
+            background: #e8f5e8;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .btn-logout {
+            background: linear-gradient(45deg, #dc3545, #c82333);
+            padding: 8px 15px;
+            font-size: 14px;
+            width: auto;
+            margin: 0;
+        }
+        
         .header {
             background: linear-gradient(45deg, #2c3e50, #34495e);
             color: white;
@@ -214,6 +247,12 @@
         </div>
         
         <div class="content">
+            <!-- Authentication Status -->
+            <div id="auth-status" class="auth-info hidden">
+                <span>Logged in as: <strong id="current-user"></strong></span>
+                <button class="btn-logout" onclick="logout()">Logout</button>
+            </div>
+            
             <!-- Get All Films Section -->
             <div class="section">
                 <h2>📋 View All Films</h2>
@@ -275,9 +314,43 @@
             </div>
         </div>
     </div>
+    
+    <!-- Login Modal -->
+    <div id="login-container" class="login-container">
+        <div class="header">
+            <h1>🔐 Login Required</h1>
+            <p>Please login to access the Film API</p>
+        </div>
+        
+        <div class="content">
+            <div class="section">
+                <h2>🔑 User Login</h2>
+                <div class="form-group">
+                    <label for="login-username">Username:</label>
+                    <input type="text" id="login-username" placeholder="Enter username">
+                </div>
+                <div class="form-group">
+                    <label for="login-password">Password:</label>
+                    <input type="password" id="login-password" placeholder="Enter password">
+                </div>
+                <button onclick="login()">Login</button>
+                <div class="loading" id="loading-login">Logging in...</div>
+                <div id="login-response"></div>
+                
+                <div style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; font-size: 14px;">
+                    <strong>Demo Accounts:</strong><br>
+                    • admin / admin123<br>
+                    • user1 / password123<br>
+                    • demo / demo456
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script>
         const API_BASE = '/api/films';
+        let authToken = localStorage.getItem('authToken');
+        let currentUser = localStorage.getItem('currentUser');
         
         function showLoading(elementId) {
             document.getElementById(elementId).style.display = 'block';
@@ -294,10 +367,107 @@
             element.style.display = 'block';
         }
         
+        function getAuthHeaders() {
+            return authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+        }
+        
+        function checkAuthStatus() {
+            if (authToken && currentUser) {
+                document.getElementById('login-container').classList.add('hidden');
+                document.querySelector('.container').classList.remove('hidden');
+                document.getElementById('auth-status').classList.remove('hidden');
+                document.getElementById('current-user').textContent = currentUser;
+            } else {
+                document.getElementById('login-container').classList.remove('hidden');
+                document.querySelector('.container').classList.add('hidden');
+                document.getElementById('auth-status').classList.add('hidden');
+            }
+        }
+        
+        async function login() {
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            
+            if (!username || !password) {
+                showResponse('login-response', 'Please enter both username and password', true);
+                return;
+            }
+            
+            showLoading('loading-login');
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password }),
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    authToken = data.token;
+                    currentUser = username;
+                    localStorage.setItem('authToken', authToken);
+                    localStorage.setItem('currentUser', currentUser);
+                    showResponse('login-response', 'Login successful! Redirecting...');
+                    setTimeout(() => {
+                        checkAuthStatus();
+                        getAllFilms(); // Load films after login
+                    }, 1000);
+                } else {
+                    const error = await response.text();
+                    showResponse('login-response', `Login failed: ${error}`, true);
+                }
+            } catch (error) {
+                showResponse('login-response', `Error: ${error.message}`, true);
+            } finally {
+                hideLoading('loading-login');
+            }
+        }
+        
+        async function logout() {
+            if (!authToken) return;
+            
+            try {
+                await fetch('/api/logout', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                    },
+                });
+            } catch (error) {
+                console.error('Logout error:', error);
+            }
+            
+            // Clear local storage and reset UI
+            authToken = null;
+            currentUser = null;
+            localStorage.removeItem('authToken');
+            localStorage.removeItem('currentUser');
+            checkAuthStatus();
+            
+            // Clear form fields
+            document.getElementById('login-username').value = '';
+            document.getElementById('login-password').value = '';
+        }
+        
+        function handleAuthError() {
+            alert('Your session has expired. Please login again.');
+            logout();
+        }
+        
         async function getAllFilms() {
             showLoading('loading-get');
             try {
-                const response = await fetch(API_BASE);
+                const response = await fetch(API_BASE, {
+                    headers: getAuthHeaders()
+                });
+                
+                if (response.status === 401) {
+                    handleAuthError();
+                    return;
+                }
+                
                 const films = await response.json();
                 displayFilms(films);
             } catch (error) {
@@ -348,9 +518,15 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
+                        ...getAuthHeaders()
                     },
                     body: JSON.stringify({ title, director, year, genre }),
                 });
+                
+                if (response.status === 401) {
+                    handleAuthError();
+                    return;
+                }
                 
                 if (response.ok) {
                     const newFilm = await response.json();
@@ -391,9 +567,15 @@
                     method: 'PUT',
                     headers: {
                         'Content-Type': 'application/json',
+                        ...getAuthHeaders()
                     },
                     body: JSON.stringify({ title, director, year, genre }),
                 });
+                
+                if (response.status === 401) {
+                    handleAuthError();
+                    return;
+                }
                 
                 if (response.ok) {
                     const updatedFilm = await response.json();
@@ -425,7 +607,13 @@
             try {
                 const response = await fetch(`${API_BASE}/${id}`, {
                     method: 'DELETE',
+                    headers: getAuthHeaders()
                 });
+                
+                if (response.status === 401) {
+                    handleAuthError();
+                    return;
+                }
                 
                 if (response.ok) {
                     alert('Film deleted successfully!');
@@ -450,8 +638,20 @@
             document.querySelector('h2:nth-of-type(3)').scrollIntoView({ behavior: 'smooth' });
         }
         
-        // Load films when page loads
-        window.addEventListener('DOMContentLoaded', getAllFilms);
+        // Handle Enter key for login
+        document.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !document.getElementById('login-container').classList.contains('hidden')) {
+                login();
+            }
+        });
+        
+        // Check auth status and load films when page loads
+        window.addEventListener('DOMContentLoaded', function() {
+            checkAuthStatus();
+            if (authToken) {
+                getAllFilms();
+            }
+        });
     </script>
 </body>
 </html>
