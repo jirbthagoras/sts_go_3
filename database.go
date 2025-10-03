@@ -34,30 +34,66 @@ func GetDatabaseConfig() DatabaseConfig {
 	}
 }
 
+// loadEnv loads environment variables from .env file
+func loadEnv() error {
+	file, err := os.Open(".env")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		
+		// Split key=value
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		
+		// Set environment variable if not already set
+		if os.Getenv(key) == "" {
+			os.Setenv(key, value)
+		}
+	}
+	
+	return scanner.Err()
+}
+
 // getEnv gets environment variable or returns default value
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
-	return defaultValue
 }
 
 // ConnectDatabase establishes connection to PostgreSQL database
 func ConnectDatabase() (*gorm.DB, error) {
 	config := GetDatabaseConfig()
-
+	
+	log.Printf("🔗 Connecting to database: %s@%s:%s/%s", config.User, config.Host, config.Port, config.DBName)
+	
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=Asia/Jakarta",
 		config.Host, config.User, config.Password, config.DBName, config.Port, config.SSLMode)
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Info),
-	})
+		SkipDefaultTransaction: true,
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
 
-	log.Println("✅ Successfully connected to PostgreSQL database")
+	log.Printf("✅ Successfully connected to PostgreSQL database at %s:%s", config.Host, config.Port)
 	return db, nil
 }
 

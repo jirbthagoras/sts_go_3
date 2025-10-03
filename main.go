@@ -435,6 +435,14 @@ func staticHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// Load environment variables from .env file
+	if err := loadEnv(); err != nil {
+		log.Printf("Warning: Error loading .env file: %v", err)
+		log.Println("Continuing with system environment variables...")
+	} else {
+		log.Println("✅ Successfully loaded .env file")
+	}
+
 	// Connect to database
 	var err error
 	db, err = ConnectDatabase()
