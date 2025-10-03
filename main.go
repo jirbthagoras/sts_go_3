@@ -5,48 +5,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v2"
+	"os"
+
+	"gorm.io/gorm"
 )
-
-// Film represents a movie with its details
-type Film struct {
-	ID       int    `json:"id"`
-	Title    string `json:"title"`
-	Director string `json:"director"`
-	Year     int    `json:"year"`
-	Genre    string `json:"genre"`
-}
-
-// User represents a user from config
-type User struct {
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-}
-
-// Config represents the configuration structure
-type Config struct {
-	Users []User `yaml:"users"`
-}
-
-// LoginRequest represents login request payload
-type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-// LoginResponse represents login response
-type LoginResponse struct {
-	Token string `json:"token"`
-}
 
 // TokenStore manages active tokens
 type TokenStore struct {
@@ -98,94 +67,11 @@ func (ts *TokenStore) RemoveToken(token string) {
 	delete(ts.tokens, token)
 }
 
-// FilmStore manages the film data in memory
-type FilmStore struct {
-	mu     sync.RWMutex
-	films  map[int]Film
-	nextID int
-}
-
-// NewFilmStore creates a new film store with sample data
-func NewFilmStore() *FilmStore {
-	store := &FilmStore{
-		films:  make(map[int]Film),
-		nextID: 1,
-	}
-
-	// Add some sample films
-	sampleFilms := []Film{
-		{Title: "The Shawshank Redemption", Director: "Frank Darabont", Year: 1994, Genre: "Drama"},
-		{Title: "The Godfather", Director: "Francis Ford Coppola", Year: 1972, Genre: "Crime"},
-		{Title: "The Dark Knight", Director: "Christopher Nolan", Year: 2008, Genre: "Action"},
-		{Title: "Pulp Fiction", Director: "Quentin Tarantino", Year: 1994, Genre: "Crime"},
-		{Title: "Forrest Gump", Director: "Robert Zemeckis", Year: 1994, Genre: "Drama"},
-	}
-
-	for _, film := range sampleFilms {
-		store.addFilm(film)
-	}
-
-	return store
-}
-
-func (fs *FilmStore) addFilm(film Film) Film {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	film.ID = fs.nextID
-	fs.films[fs.nextID] = film
-	fs.nextID++
-	return film
-}
-
-func (fs *FilmStore) getFilms() []Film {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
-	films := make([]Film, 0, len(fs.films))
-	for _, film := range fs.films {
-		films = append(films, film)
-	}
-	return films
-}
-
-func (fs *FilmStore) getFilm(id int) (Film, bool) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
-	film, exists := fs.films[id]
-	return film, exists
-}
-
-func (fs *FilmStore) updateFilm(id int, updatedFilm Film) (Film, bool) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	if _, exists := fs.films[id]; !exists {
-		return Film{}, false
-	}
-
-	updatedFilm.ID = id
-	fs.films[id] = updatedFilm
-	return updatedFilm, true
-}
-
-func (fs *FilmStore) deleteFilm(id int) bool {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	if _, exists := fs.films[id]; !exists {
-		return false
-	}
-
-	delete(fs.films, id)
-	return true
-}
-
-// Global stores
-var filmStore *FilmStore
+// Global services
+var filmService *FilmService
+var userService *UserService
 var tokenStore *TokenStore
-var config Config
+var db *gorm.DB
 
 // CORS middleware
 func enableCORS(w http.ResponseWriter) {
@@ -198,171 +84,190 @@ func enableCORS(w http.ResponseWriter) {
 func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		enableCORS(w)
-		
+
 		if r.Method == "OPTIONS" {
 			return
 		}
-		
+
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			http.Error(w, "Authorization header required", http.StatusUnauthorized)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Authorization header required"})
 			return
 		}
-		
+
 		// Check for Bearer token format
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			http.Error(w, "Invalid authorization header format", http.StatusUnauthorized)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid authorization header format"})
 			return
 		}
-		
+
 		token := parts[1]
 		if !tokenStore.ValidateToken(token) {
-			http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid or expired token"})
 			return
 		}
-		
+
 		next(w, r)
 	}
 }
 
-// Load configuration from YAML file
-func loadConfig() error {
-	file, err := os.Open("config.yaml")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	
-	data, err := ioutil.ReadAll(file)
-	if err != nil {
-		return err
-	}
-	
-	return yaml.Unmarshal(data, &config)
-}
-
-// Validate user credentials
-func validateUser(username, password string) bool {
-	for _, user := range config.Users {
-		if user.Username == username && user.Password == password {
-			return true
-		}
-	}
-	return false
-}
-
-// POST /api/login - User login
+// loginHandler handles user login
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
-	
+
 	if r.Method == "OPTIONS" {
 		return
 	}
-	
+
 	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Method not allowed"})
 		return
 	}
-	
+
 	var loginReq LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&loginReq); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid JSON"})
 		return
 	}
-	
+
 	if loginReq.Username == "" || loginReq.Password == "" {
-		http.Error(w, "Username and password are required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Username and password are required"})
 		return
 	}
-	
-	if !validateUser(loginReq.Username, loginReq.Password) {
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+
+	if !userService.ValidateUser(loginReq.Username, loginReq.Password) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid credentials"})
 		return
 	}
-	
+
 	// Generate token
 	token := tokenStore.GenerateToken()
 	tokenStore.AddToken(token)
-	
+
 	response := LoginResponse{Token: token}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
-// POST /api/logout - User logout
+// logoutHandler handles user logout
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
-	
+
 	if r.Method == "OPTIONS" {
 		return
 	}
-	
+
 	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Method not allowed"})
 		return
 	}
-	
+
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		http.Error(w, "Authorization header required", http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Authorization header required"})
 		return
 	}
-	
+
 	parts := strings.Split(authHeader, " ")
 	if len(parts) != 2 || parts[0] != "Bearer" {
-		http.Error(w, "Invalid authorization header format", http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid authorization header format"})
 		return
 	}
-	
+
 	token := parts[1]
 	tokenStore.RemoveToken(token)
-	
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Logged out successfully"))
+	json.NewEncoder(w).Encode(SuccessResponse{Message: "Logged out successfully"})
 }
 
-// GET /api/films - Get all films (protected)
+// getFilmsHandler handles getting all films
 func getFilmsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Method not allowed"})
 		return
 	}
 
-	films := filmStore.getFilms()
+	films, err := filmService.GetAllFilms()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Failed to retrieve films"})
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(films)
 }
 
-// POST /api/films - Add a new film (protected)
+// addFilmHandler handles adding a new film
 func addFilmHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Method not allowed"})
 		return
 	}
 
-	var film Film
-	if err := json.NewDecoder(r.Body).Decode(&film); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	var filmReq FilmRequest
+	if err := json.NewDecoder(r.Body).Decode(&filmReq); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid JSON"})
 		return
 	}
 
 	// Validate required fields
-	if film.Title == "" || film.Director == "" || film.Year == 0 {
-		http.Error(w, "Title, director, and year are required", http.StatusBadRequest)
+	if filmReq.Title == "" || filmReq.Director == "" || filmReq.Year == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Title, director, and year are required"})
 		return
 	}
 
-	newFilm := filmStore.addFilm(film)
+	newFilm, err := filmService.CreateFilm(filmReq)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Failed to create film"})
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(newFilm)
 }
 
-// PUT /api/films/{id} - Update a film (protected)
+// updateFilmHandler handles updating a film
 func updateFilmHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "PUT" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Method not allowed"})
 		return
 	}
 
@@ -370,25 +275,39 @@ func updateFilmHandler(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/films/")
 	id, err := strconv.Atoi(path)
 	if err != nil {
-		http.Error(w, "Invalid film ID", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid film ID"})
 		return
 	}
 
-	var film Film
-	if err := json.NewDecoder(r.Body).Decode(&film); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	var filmReq FilmRequest
+	if err := json.NewDecoder(r.Body).Decode(&filmReq); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid JSON"})
 		return
 	}
 
 	// Validate required fields
-	if film.Title == "" || film.Director == "" || film.Year == 0 {
-		http.Error(w, "Title, director, and year are required", http.StatusBadRequest)
+	if filmReq.Title == "" || filmReq.Director == "" || filmReq.Year == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Title, director, and year are required"})
 		return
 	}
 
-	updatedFilm, exists := filmStore.updateFilm(id, film)
-	if !exists {
-		http.Error(w, "Film not found", http.StatusNotFound)
+	updatedFilm, err := filmService.UpdateFilm(uint(id), filmReq)
+	if err != nil {
+		if err.Error() == "film not found" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Film not found"})
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Failed to update film"})
+		}
 		return
 	}
 
@@ -396,10 +315,12 @@ func updateFilmHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(updatedFilm)
 }
 
-// DELETE /api/films/{id} - Delete a film (protected)
+// deleteFilmHandler handles deleting a film
 func deleteFilmHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "DELETE" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Method not allowed"})
 		return
 	}
 
@@ -407,12 +328,23 @@ func deleteFilmHandler(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/films/")
 	id, err := strconv.Atoi(path)
 	if err != nil {
-		http.Error(w, "Invalid film ID", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Invalid film ID"})
 		return
 	}
 
-	if !filmStore.deleteFilm(id) {
-		http.Error(w, "Film not found", http.StatusNotFound)
+	err = filmService.DeleteFilm(uint(id))
+	if err != nil {
+		if err.Error() == "film not found" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Film not found"})
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Failed to delete film"})
+		}
 		return
 	}
 
@@ -430,7 +362,9 @@ func filmsHandler(w http.ResponseWriter, r *http.Request) {
 		case "POST":
 			addFilmHandler(w, r)
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Method not allowed"})
 		}
 	} else if strings.HasPrefix(path, "/api/films/") {
 		switch r.Method {
@@ -439,8 +373,53 @@ func filmsHandler(w http.ResponseWriter, r *http.Request) {
 		case "DELETE":
 			deleteFilmHandler(w, r)
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Method not allowed"})
 		}
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "Not found"})
+	}
+}
+
+// swaggerHandler serves the swagger YAML file and UI
+func swaggerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/swagger/" || r.URL.Path == "/swagger/index.html" {
+		// Serve Swagger UI HTML
+		html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>API Documentation</title>
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@3.25.0/swagger-ui.css" />
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@3.25.0/swagger-ui-bundle.js"></script>
+    <script>
+        SwaggerUIBundle({
+            url: '/swagger.yaml',
+            dom_id: '#swagger-ui',
+            presets: [
+                SwaggerUIBundle.presets.apis,
+                SwaggerUIBundle.presets.standalone
+            ]
+        });
+    </script>
+</body>
+</html>`
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(html))
+	} else if r.URL.Path == "/swagger.yaml" {
+		// Serve the YAML file
+		yamlContent, err := os.ReadFile("swagger.yaml")
+		if err != nil {
+			http.Error(w, "Swagger YAML file not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-yaml")
+		w.Write(yamlContent)
 	} else {
 		http.Error(w, "Not found", http.StatusNotFound)
 	}
@@ -456,20 +435,40 @@ func staticHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Load configuration
-	if err := loadConfig(); err != nil {
-		log.Fatal("Failed to load config:", err)
+	// Connect to database
+	var err error
+	db, err = ConnectDatabase()
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
 	}
 
-	// Initialize stores
-	filmStore = NewFilmStore()
+	// Run migrations
+	if err := MigrateDatabase(db); err != nil {
+		log.Fatal("Failed to migrate database:", err)
+	}
+
+	// Initialize services
+	filmService = NewFilmService(db)
+	userService = NewUserService(db)
 	tokenStore = NewTokenStore()
+
+	// Seed database with initial data
+	if err := SeedDatabase(db); err != nil {
+		log.Printf("Warning: Failed to seed database: %v", err)
+	}
+
+	// Seed users
+	if err := userService.SeedUsers(); err != nil {
+		log.Printf("Warning: Failed to seed users: %v", err)
+	}
 
 	// Register handlers
 	http.HandleFunc("/api/login", loginHandler)
 	http.HandleFunc("/api/logout", logoutHandler)
 	http.HandleFunc("/api/films", requireAuth(filmsHandler))
 	http.HandleFunc("/api/films/", requireAuth(filmsHandler))
+	http.HandleFunc("/swagger/", swaggerHandler)
+	http.HandleFunc("/swagger.yaml", swaggerHandler)
 	http.HandleFunc("/", staticHandler)
 
 	fmt.Println("🎬 Film REST API Server starting on http://localhost:8080")
@@ -481,8 +480,10 @@ func main() {
 	fmt.Println("   POST   /api/films     - Add new film (requires auth)")
 	fmt.Println("   PUT    /api/films/{id} - Update film (requires auth)")
 	fmt.Println("   DELETE /api/films/{id} - Delete film (requires auth)")
+	fmt.Println("📚 API Documentation: http://localhost:8080/swagger/")
 	fmt.Println("🌐 Web Interface: http://localhost:8080")
 	fmt.Println("👤 Default users: admin/admin123, user1/password123, demo/demo456")
+	fmt.Println("🗄️  Database: PostgreSQL")
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
