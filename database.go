@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -23,10 +25,10 @@ type DatabaseConfig struct {
 // GetDatabaseConfig returns database configuration from environment variables or defaults
 func GetDatabaseConfig() DatabaseConfig {
 	return DatabaseConfig{
-		Host:     getEnv("DB_HOST", "nozomi.proxy.rlwy.net"),
-		Port:     getEnv("DB_PORT", "37117"),
+		Host:     getEnv("DB_HOST", "localhost"),
+		Port:     getEnv("DB_PORT", "5432"),
 		User:     getEnv("DB_USER", "postgres"),
-		Password: getEnv("DB_PASSWORD", "AAcIPtrhiMqsgAWABvpwZHLTbYpRBJsG"),
+		Password: getEnv("DB_PASSWORD", "passsword"),
 		DBName:   getEnv("DB_NAME", "postgres"),
 		SSLMode:  getEnv("DB_SSLMODE", "disable"),
 	}
