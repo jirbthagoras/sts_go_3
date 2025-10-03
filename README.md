@@ -14,6 +14,9 @@ A simple REST API built with pure Go HTTP for managing film data. This project d
 
 ## 🚀 Quick Start
 
+## API Docs Link
+https://documenter.getpostman.com/view/34415611/2sB3QGtBXu
+
 1. **Run the server:**
    ```bash
    go run main.go
